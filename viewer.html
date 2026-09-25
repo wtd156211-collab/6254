@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>调用预算轨迹查看器</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 20px 32px;
+    font: 14px/1.5 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: #24292f; background: #fafbfc;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-bottom: 10px; }
+  .bar label { display: inline-flex; align-items: center; gap: 6px; }
+  input[type="file"] { font-size: 13px; }
+  #summary { color: #57606a; font-size: 13px; }
+  #legend { display: flex; gap: 16px; align-items: center; margin: 6px 0 10px; font-size: 13px; color: #57606a; }
+  .chip { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  #wrap { overflow-x: auto; border: 1px solid #d0d7de; border-radius: 8px; background: #fff; }
+  canvas { display: block; }
+  #empty { color: #8c959f; padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<h1>调用预算轨迹查看器</h1>
+<div class="bar">
+  <label>脚本 JSON <input type="file" id="scriptFile" accept=".json,application/json"></label>
+  <label>轨迹 trace <input type="file" id="traceFile" accept=".trace,.txt,text/plain"></label>
+  <span id="summary"></span>
+</div>
+<div id="legend">
+  <span><span class="chip" style="background:#2e9e5b"></span>done</span>
+  <span><span class="chip" style="background:#e6a23c"></span>partial</span>
+  <span><span class="chip" style="background:#d64541"></span>timeout</span>
+  <span><span class="chip" style="background:#8a8f98"></span>cancelled</span>
+  <span>行内区间 = START → 结算时刻；未启动的节点只有取消标记</span>
+</div>
+<div id="wrap"><div id="empty">选入脚本与轨迹文件后在此绘图（纯本地解析，不发网络请求）</div><canvas id="cv" hidden></canvas></div>
+<script>
+"use strict";
+
+const COLORS = {
+  done: "#2e9e5b",
+  partial: "#e6a23c",
+  timeout: "#d64541",
+  cancelled: "#8a8f98",
+};
+const ROW_H = 26, BAR_H = 12, TOP = 46, BOTTOM = 30, RIGHT_PAD = 160;
+
+const input = { script: null, traceText: null };
+
+function readFile(file, cb) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => cb(reader.result);
+  reader.readAsText(file, "utf-8");
+}
+
+document.getElementById("scriptFile").addEventListener("change", (e) => {
+  readFile(e.target.files[0], (text) => { input.script = JSON.parse(text); render(); });
+});
+document.getElementById("traceFile").addEventListener("change", (e) => {
+  readFile(e.target.files[0], (text) => { input.traceText = text; render(); });
+});
+
+function parseTrace(text) {
+  const events = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let m = line.match(/^(\d+) START (\S+)$/);
+    if (m) { events.push({ t: +m[1], kind: "START", id: m[2] }); continue; }
+    m = line.match(/^(\d+) END (\S+)( partial)?$/);
+    if (m) { events.push({ t: +m[1], kind: "END", id: m[2], partial: !!m[3] }); continue; }
+    m = line.match(/^(\d+) TIMEOUT (\S+)$/);
+    if (m) { events.push({ t: +m[1], kind: "TIMEOUT", id: m[2] }); continue; }
+    m = line.match(/^(\d+) CANCEL (\S+) by=(\S+) reason=(\S+)$/);
+    if (m) { events.push({ t: +m[1], kind: "CANCEL", id: m[2], by: m[3], reason: m[4] }); continue; }
+    throw new Error("无法解析的轨迹行: " + line);
+  }
+  return events;
+}
+
+// 行顺序：有脚本按声明先序（父子包含关系上下相邻），否则按轨迹首现顺序。
+function buildRows(script, events) {
+  const order = [];
+  const depthOf = new Map();
+  if (script && script.tree) {
+    const stack = [[script.tree, 0]];
+    while (stack.length) {
+      const [obj, depth] = stack.pop();
+      order.push(obj.id);
+      depthOf.set(obj.id, depth);
+      const children = obj.children || [];
+      for (let i = children.length - 1; i >= 0; i--) stack.push([children[i], depth + 1]);
+    }
+  }
+  const rows = new Map();
+  for (const id of order) rows.set(id, { id, depth: depthOf.get(id), start: null, end: null, status: null, by: null, reason: null });
+  for (const ev of events) {
+    if (!rows.has(ev.id)) rows.set(ev.id, { id: ev.id, depth: 0, start: null, end: null, status: null, by: null, reason: null });
+    const row = rows.get(ev.id);
+    if (ev.kind === "START") row.start = ev.t;
+    else if (ev.kind === "END") { row.end = ev.t; row.status = ev.partial ? "partial" : "done"; }
+    else if (ev.kind === "TIMEOUT") { row.end = ev.t; row.status = "timeout"; }
+    else if (ev.kind === "CANCEL") { row.end = ev.t; row.status = "cancelled"; row.by = ev.by; row.reason = ev.reason; }
+  }
+  return [...rows.values()];
+}
+
+function niceStep(span, target) {
+  const raw = span / target;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const k of [1, 2, 5, 10]) if (k * pow >= raw) return k * pow;
+  return 10 * pow;
+}
+
+function render() {
+  const summary = document.getElementById("summary");
+  const canvas = document.getElementById("cv");
+  const empty = document.getElementById("empty");
+  if (!input.traceText) return;
+  let events;
+  try {
+    events = parseTrace(input.traceText);
+  } catch (err) {
+    summary.textContent = String(err.message || err);
+    return;
+  }
+  const rows = buildRows(input.script, events);
+  const maxT = Math.max(1, ...events.map((e) => e.t));
+
+  const dpr = window.devicePixelRatio || 1;
+  const ctx = canvas.getContext("2d");
+  ctx.font = "12px ui-monospace, SFMono-Regular, Consolas, monospace";
+  let labelW = 40;
+  for (const row of rows) labelW = Math.max(labelW, ctx.measureText(row.id).width + row.depth * 10);
+  const left = Math.ceil(labelW) + 16;
+
+  const width = Math.max(720, document.getElementById("wrap").clientWidth - 2);
+  const height = TOP + rows.length * ROW_H + BOTTOM;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+  canvas.hidden = false;
+  empty.hidden = true;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const x = (t) => left + (width - left - RIGHT_PAD) * (t / maxT);
+  const rowY = (i) => TOP + i * ROW_H + ROW_H / 2;
+
+  // 时间轴与网格
+  const step = niceStep(maxT, 8);
+  ctx.strokeStyle = "#d0d7de";
+  ctx.fillStyle = "#57606a";
+  ctx.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
+  ctx.textAlign = "center";
+  ctx.beginPath();
+  ctx.moveTo(left, TOP - 10);
+  ctx.lineTo(width - RIGHT_PAD, TOP - 10);
+  ctx.stroke();
+  for (let t = 0; t <= maxT; t += step) {
+    ctx.beginPath();
+    ctx.moveTo(x(t), TOP - 10);
+    ctx.lineTo(x(t), height - BOTTOM + 6);
+    ctx.strokeStyle = "#eaeef2";
+    ctx.stroke();
+    ctx.fillText(t + "ms", x(t), TOP - 16);
+  }
+
+  // 行标签与区间
+  ctx.textAlign = "left";
+  rows.forEach((row, i) => {
+    const y = rowY(i);
+    ctx.fillStyle = "#24292f";
+    ctx.font = "12px ui-monospace, SFMono-Regular, Consolas, monospace";
+    ctx.fillText(row.id, 8 + row.depth * 10, y + 4);
+    if (row.start === null) {
+      // 从未启动：只有取消标记
+      if (row.end !== null) drawCancelMark(ctx, x(row.end), y, row);
+      return;
+    }
+    const x0 = x(row.start);
+    const x1 = x(row.end === null ? maxT : row.end);
+    ctx.fillStyle = COLORS[row.status] || "#8a8f98";
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(x0, y - BAR_H / 2, Math.max(2, x1 - x0), BAR_H);
+    ctx.globalAlpha = 1;
+    // START 标记：左端竖线
+    ctx.fillRect(x0 - 1, y - BAR_H / 2 - 3, 2, BAR_H + 6);
+    if (row.status === "done" || row.status === "partial") {
+      ctx.beginPath();
+      ctx.arc(x1, y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (row.status === "timeout") {
+      ctx.fillRect(x1 - 4, y - 4, 8, 8);
+    } else if (row.status === "cancelled") {
+      drawCancelMark(ctx, x1, y, row);
+    }
+  });
+
+  // 父子包含关系：从父行到子行的浅色竖线（x 取子调用起点）
+  if (input.script && input.script.tree) {
+    const rowIndex = new Map(rows.map((r, i) => [r.id, i]));
+    ctx.strokeStyle = "#d8dee4";
+    ctx.setLineDash([2, 3]);
+    const stack = [[input.script.tree, null]];
+    while (stack.length) {
+      const [obj, parentId] = stack.pop();
+      const row = rows[rowIndex.get(obj.id)];
+      if (parentId !== null && row && row.start !== null) {
+        const py = rowY(rowIndex.get(parentId));
+        const cy = rowY(rowIndex.get(obj.id));
+        ctx.beginPath();
+        ctx.moveTo(x(row.start), py);
+        ctx.lineTo(x(row.start), cy);
+        ctx.stroke();
+      }
+      const children = obj.children || [];
+      for (let k = children.length - 1; k >= 0; k--) stack.push([children[k], obj.id]);
+    }
+    ctx.setLineDash([]);
+  }
+
+  const counts = { done: 0, partial: 0, timeout: 0, cancelled: 0 };
+  for (const row of rows) if (row.status) counts[row.status]++;
+  summary.textContent =
+    `共 ${rows.length} 个节点 · 总时长 ${maxT} ms · ` +
+    `done ${counts.done} / partial ${counts.partial} / timeout ${counts.timeout} / cancelled ${counts.cancelled}`;
+}
+
+function drawCancelMark(ctx, cx, y, row) {
+  ctx.fillStyle = COLORS.cancelled;
+  ctx.beginPath();
+  ctx.moveTo(cx, y - 5);
+  ctx.lineTo(cx + 5, y);
+  ctx.lineTo(cx, y + 5);
+  ctx.lineTo(cx - 5, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#57606a";
+  ctx.font = "11px ui-monospace, SFMono-Regular, Consolas, monospace";
+  ctx.fillText(`by=${row.by} reason=${row.reason}`, cx + 8, y + 4);
+}
+</script>
+</body>
+</html>
