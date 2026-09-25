@@ -1,0 +1,7 @@
+0 START root
+0 START A
+0 START B
+200 TIMEOUT A
+200 CANCEL A1 by=A reason=budget
+300 END B
+340 END root partial

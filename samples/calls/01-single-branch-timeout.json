@@ -1,0 +1,22 @@
+{
+  "name": "01-single-branch-timeout",
+  "config": {
+    "deadline_ms": 900,
+    "floor_ms": 50,
+    "cap_ms": 300,
+    "max_concurrency": 3,
+    "memory_limit": 4
+  },
+  "tree": {
+    "id": "root",
+    "mem": 1,
+    "children": [
+      {"id": "long", "weight": 1, "mem": 2},
+      {"id": "short", "weight": 1, "mem": 1}
+    ]
+  },
+  "script": {
+    "work": {"root": 60, "long": 800, "short": 120},
+    "events": []
+  }
+}

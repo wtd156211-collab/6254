@@ -1,0 +1,29 @@
+{
+  "name": "02-sibling-unaffected",
+  "config": {
+    "deadline_ms": 600,
+    "floor_ms": 50,
+    "cap_ms": 400,
+    "max_concurrency": 4,
+    "memory_limit": 4
+  },
+  "tree": {
+    "id": "root",
+    "mem": 1,
+    "children": [
+      {
+        "id": "A",
+        "weight": 1,
+        "mem": 1,
+        "children": [
+          {"id": "A1", "weight": 1, "mem": 3}
+        ]
+      },
+      {"id": "B", "weight": 2, "mem": 2}
+    ]
+  },
+  "script": {
+    "work": {"root": 40, "A": 20, "A1": 1000, "B": 300},
+    "events": []
+  }
+}

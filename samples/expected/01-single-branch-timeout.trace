@@ -1,0 +1,6 @@
+0 START root
+0 START long
+0 START short
+120 END short
+300 TIMEOUT long
+360 END root partial

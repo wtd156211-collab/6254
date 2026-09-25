@@ -1,0 +1,29 @@
+{
+  "name": "03-parent-deadline-first",
+  "config": {
+    "deadline_ms": 1200,
+    "floor_ms": 50,
+    "cap_ms": 1000,
+    "max_concurrency": 4,
+    "memory_limit": 4
+  },
+  "tree": {
+    "id": "root",
+    "mem": 1,
+    "children": [
+      {"id": "A", "weight": 1, "mem": 2},
+      {
+        "id": "B",
+        "weight": 9,
+        "mem": 1,
+        "children": [
+          {"id": "G", "weight": 1, "mem": 1}
+        ]
+      }
+    ]
+  },
+  "script": {
+    "work": {"root": 40, "A": 500, "B": 200, "G": 900},
+    "events": []
+  }
+}

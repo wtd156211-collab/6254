@@ -1,0 +1,25 @@
+{
+  "name": "05-cancel-vs-complete",
+  "config": {
+    "deadline_ms": 600,
+    "floor_ms": 50,
+    "cap_ms": 200,
+    "max_concurrency": 3,
+    "memory_limit": 4
+  },
+  "tree": {
+    "id": "root",
+    "mem": 1,
+    "children": [
+      {"id": "p", "weight": 1, "mem": 2},
+      {"id": "q", "weight": 1, "mem": 1}
+    ]
+  },
+  "script": {
+    "work": {"root": 60, "p": 200, "q": 1000},
+    "events": [
+      {"at_ms": 200, "kind": "cancel", "by": "caller", "target": "p"},
+      {"at_ms": 200, "kind": "cancel", "by": "supervisor", "target": "q"}
+    ]
+  }
+}

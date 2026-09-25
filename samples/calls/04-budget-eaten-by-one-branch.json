@@ -1,0 +1,23 @@
+{
+  "name": "04-budget-eaten-by-one-branch",
+  "config": {
+    "deadline_ms": 300,
+    "floor_ms": 60,
+    "cap_ms": 300,
+    "max_concurrency": 4,
+    "memory_limit": 6
+  },
+  "tree": {
+    "id": "root",
+    "mem": 1,
+    "children": [
+      {"id": "a", "weight": 8, "mem": 2},
+      {"id": "b", "weight": 1, "mem": 1},
+      {"id": "c", "weight": 1, "mem": 1}
+    ]
+  },
+  "script": {
+    "work": {"root": 30, "a": 500, "b": 30, "c": 60},
+    "events": []
+  }
+}

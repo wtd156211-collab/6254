@@ -1,0 +1,6 @@
+0 START root
+0 START p
+0 START q
+200 END p
+200 CANCEL q by=supervisor reason=external
+260 END root partial

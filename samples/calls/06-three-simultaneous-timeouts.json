@@ -1,0 +1,30 @@
+{
+  "name": "06-three-simultaneous-timeouts",
+  "config": {
+    "deadline_ms": 1200,
+    "floor_ms": 50,
+    "cap_ms": 300,
+    "max_concurrency": 5,
+    "memory_limit": 6
+  },
+  "tree": {
+    "id": "root",
+    "mem": 1,
+    "children": [
+      {"id": "X", "weight": 1, "mem": 1},
+      {"id": "Y", "weight": 1, "mem": 1},
+      {
+        "id": "Z",
+        "weight": 1,
+        "mem": 1,
+        "children": [
+          {"id": "Z1", "weight": 1, "mem": 1}
+        ]
+      }
+    ]
+  },
+  "script": {
+    "work": {"root": 50, "X": 999, "Y": 999, "Z": 999, "Z1": 999},
+    "events": []
+  }
+}
