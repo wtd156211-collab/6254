@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>超时预算复盘 · 调用时间轴</title>
+<style>
+  body { margin: 0; padding: 16px 24px; font: 14px/1.5 "PingFang SC", "Microsoft YaHei", sans-serif; color: #222; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  .bar { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .bar label { display: flex; gap: 6px; align-items: center; }
+  #status { color: #666; }
+  #status.ok { color: #2e7d32; }
+  #status.err { color: #c62828; }
+  .legend { display: flex; gap: 14px; margin: 8px 0; color: #555; font-size: 13px; }
+  .legend span::before { content: ""; display: inline-block; width: 12px; height: 12px;
+    border-radius: 2px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
+  #wrap { overflow: auto; border: 1px solid #ddd; border-radius: 4px; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<h1>超时预算复盘 · 调用时间轴</h1>
+<div class="bar">
+  <label>调用脚本 <input type="file" id="scriptFile" accept=".json"></label>
+  <label>轨迹 <input type="file" id="traceFile" accept=".trace,.txt"></label>
+  <span id="status">请选入脚本 JSON 与轨迹文件</span>
+</div>
+<div class="legend">
+  <span style="--c:#3a9d5d">done</span>
+  <span style="--c:#e8a13a">partial</span>
+  <span style="--c:#d64545">timeout（标红）</span>
+  <span style="--c:#9aa0a6">cancelled（标灰）</span>
+  <span>▶ START　■ END　✕ TIMEOUT　⊘ CANCEL（旁注 by=/reason=）</span>
+</div>
+<div id="wrap"><canvas id="cv" width="1200" height="120"></canvas></div>
+<script>
+"use strict";
+
+const ROW_H = 26, GUTTER = 220, AXIS_H = 34, PAD_R = 24, PAD_B = 14, LABEL_INDENT = 16;
+const COLORS = { done: "#3a9d5d", partial: "#e8a13a", timeout: "#d64545", cancelled: "#9aa0a6" };
+
+const state = { script: null, trace: null };
+const statusEl = document.getElementById("status");
+
+function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || ""; }
+
+function readFile(input, parse) {
+  return new Promise((resolve, reject) => {
+    const file = input.files[0];
+    if (!file) { resolve(null); return; }
+    const reader = new FileReader();
+    reader.onload = () => { try { resolve(parse(reader.result)); } catch (e) { reject(e); } };
+    reader.onerror = () => reject(new Error("读取文件失败"));
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+function parseScript(text) {
+  const spec = JSON.parse(text);
+  const rows = [];
+  (function walk(node, depth) {
+    rows.push({ id: node.id, depth: depth });
+    (node.children || []).forEach(c => walk(c, depth + 1));
+  })(spec.tree, 0);
+  return { name: spec.name || "(未命名)", rows: rows };
+}
+
+function parseTrace(text) {
+  const nodes = {};
+  let maxMs = 0;
+  const lines = text.split("\n");
+  for (const line of lines) {
+    if (!line) continue;
+    let m = line.match(/^(\d+) START (\S+)$/);
+    if (m) { rec(m[2]).start = +m[1]; maxMs = Math.max(maxMs, +m[1]); continue; }
+    m = line.match(/^(\d+) END (\S+)( partial)?$/);
+    if (m) { const n = rec(m[2]); n.end = +m[1]; n.outcome = m[3] ? "partial" : "done";
+             maxMs = Math.max(maxMs, +m[1]); continue; }
+    m = line.match(/^(\d+) TIMEOUT (\S+)$/);
+    if (m) { const n = rec(m[2]); n.end = +m[1]; n.outcome = "timeout";
+             maxMs = Math.max(maxMs, +m[1]); continue; }
+    m = line.match(/^(\d+) CANCEL (\S+) by=(\S+) reason=(\S+)$/);
+    if (m) { const n = rec(m[2]); n.end = +m[1]; n.outcome = "cancelled";
+             n.by = m[3]; n.reason = m[4]; maxMs = Math.max(maxMs, +m[1]); continue; }
+    throw new Error("无法解析的轨迹行: " + line);
+  }
+  function rec(id) { return nodes[id] || (nodes[id] = { id: id }); }
+  return { nodes: nodes, maxMs: maxMs };
+}
+
+function tickStep(maxMs) {
+  const steps = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000];
+  for (const s of steps) if (maxMs / s <= 14) return s;
+  return 200000;
+}
+
+function render() {
+  const cv = document.getElementById("cv");
+  const script = state.script, trace = state.trace;
+  if (!script || !trace) { setStatus("请选入脚本 JSON 与轨迹文件"); return; }
+
+  const rows = script.rows;
+  const maxMs = Math.max(trace.maxMs, 1);
+  const width = 1200;
+  const height = AXIS_H + rows.length * ROW_H + PAD_B;
+  cv.width = width; cv.height = height;
+  const ctx = cv.getContext("2d");
+  const x0 = GUTTER, x1 = width - PAD_R;
+  const sx = ms => x0 + (x1 - x0) * ms / maxMs;
+  const rowY = i => AXIS_H + i * ROW_H;
+
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, width, height);
+  ctx.font = "11px monospace";
+
+  const step = tickStep(maxMs);
+  ctx.strokeStyle = "#e3e3e3"; ctx.fillStyle = "#888"; ctx.textAlign = "center";
+  for (let t = 0; t <= maxMs; t += step) {
+    const x = sx(t);
+    ctx.beginPath(); ctx.moveTo(x, AXIS_H - 8); ctx.lineTo(x, height - PAD_B); ctx.stroke();
+    ctx.fillText(String(t), x, AXIS_H - 14);
+  }
+  ctx.strokeStyle = "#bbb";
+  ctx.beginPath(); ctx.moveTo(x0, AXIS_H - 8); ctx.lineTo(x1, AXIS_H - 8); ctx.stroke();
+
+  rows.forEach((row, i) => {
+    const y = rowY(i), mid = y + ROW_H / 2;
+    if (i % 2 === 1) { ctx.fillStyle = "#fafafa"; ctx.fillRect(0, y, width, ROW_H); }
+    ctx.fillStyle = "#333"; ctx.textAlign = "left";
+    ctx.fillText(row.id, 8 + row.depth * LABEL_INDENT, mid + 4);
+    const n = trace.nodes[row.id];
+    if (!n) return;
+    const color = COLORS[n.outcome] || "#bbb";
+    if (n.start !== undefined && n.end !== undefined && n.end > n.start) {
+      ctx.fillStyle = color; ctx.globalAlpha = 0.75;
+      ctx.fillRect(sx(n.start), y + 6, Math.max(sx(n.end) - sx(n.start), 2), ROW_H - 12);
+      ctx.globalAlpha = 1;
+    }
+    if (n.start !== undefined) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(sx(n.start), mid - 6); ctx.lineTo(sx(n.start) + 8, mid); ctx.lineTo(sx(n.start), mid + 6);
+      ctx.closePath(); ctx.fill();
+    }
+    if (n.outcome === "done" || n.outcome === "partial") {
+      ctx.fillStyle = color; ctx.fillRect(sx(n.end) - 3, mid - 5, 7, 10);
+    } else if (n.outcome === "timeout") {
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      const x = sx(n.end);
+      ctx.beginPath();
+      ctx.moveTo(x - 4, mid - 5); ctx.lineTo(x + 4, mid + 5);
+      ctx.moveTo(x + 4, mid - 5); ctx.lineTo(x - 4, mid + 5);
+      ctx.stroke(); ctx.lineWidth = 1;
+    } else if (n.outcome === "cancelled") {
+      ctx.strokeStyle = color; ctx.fillStyle = color;
+      const x = sx(n.end);
+      ctx.beginPath(); ctx.arc(x, mid, 5, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - 3.5, mid + 3.5); ctx.lineTo(x + 3.5, mid - 3.5); ctx.stroke();
+      ctx.fillText("by=" + n.by + " reason=" + n.reason, x + 9, mid + 4);
+    }
+  });
+
+  const settled = Object.keys(trace.nodes).length;
+  setStatus(script.name + "：共 " + rows.length + " 个节点，轨迹覆盖 " + settled +
+            " 个，虚拟时长 " + trace.maxMs + " ms", "ok");
+}
+
+function refresh() {
+  Promise.all([
+    readFile(document.getElementById("scriptFile"), parseScript),
+    readFile(document.getElementById("traceFile"), parseTrace),
+  ]).then(([script, trace]) => {
+    if (script) state.script = script;
+    if (trace) state.trace = trace;
+    render();
+  }).catch(e => setStatus("解析失败：" + e.message, "err"));
+}
+
+document.getElementById("scriptFile").addEventListener("change", refresh);
+document.getElementById("traceFile").addEventListener("change", refresh);
+render();
+</script>
+</body>
+</html>
